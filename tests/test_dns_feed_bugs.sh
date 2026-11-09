@@ -29,7 +29,7 @@ check "long-name alerts are capped" "[ \"\$(grep -c '^LONG' long.out)\" = 3 ]"
 check "volume still counts every query" "grep -q '^VOL|192.168.50.2|example.com|6$' long.out"
 
 # A query for a subdomain of a feed domain is credited to the feed.
-sed -n '/^  awk -F.|. -v pf="\$dnspairfile" -v qf="\$qfdomfile" .$/,/^  . "\$@" | while/p' "$S" | sed '1d;$d' > match.awk
+sed -n '/^  awk -F.|. -v pf="\$dnspairfile" -v qf="\$qfdomfile"[^|]*.$/,/^  . "\$@" | while/p' "$S" | sed '1d;$d' > match.awk
 echo 'sub.evil.example|192.168.50.2' > pairs; echo 'evil.example|somefeed|family' > domains
 awk -F'|' -v pf=pairs -v qf= -f match.awk pairs domains > match.out 2>&1
 check "feed credited on parent domain" "grep -q '^192.168.50.2|evil.example|somefeed|family$' match.out"
@@ -61,4 +61,10 @@ version=2.0.4; remoteversion=2.0.3; check "older version is not installed" "[ -z
 remoteversion=2.0.5; check "newer version is installed" "[ \"\$(. ./upd.sh 2>/dev/null)\" = UPDATE ]"
 
 sh -n "$S" && ok syntax || no syntax
+# A DNS exception for a subdomain still applies when a parent domain is on a feed.
+dnsmatch() { printf '%s\n' "$1" > pairs; awk -F'|' -v pf=pairs -v qf= -v excs="$2" -f match.awk pairs domains 2>&1; }
+check "exception below a feed domain is honoured" "[ -z \"\$(dnsmatch 'good.evil.example|10.0.0.1' good.evil.example)\" ]"
+check "other subdomains still match" "dnsmatch 'bad.evil.example|10.0.0.1' good.evil.example | grep -q '^10.0.0.1|evil.example|'"
+check "exception on the feed domain still reaches its check" "dnsmatch 'bad.evil.example|10.0.0.1' evil.example | grep -q '^10.0.0.1|evil.example|'"
+
 exit $rc

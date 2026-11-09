@@ -5937,14 +5937,15 @@ checkdns()
   [ -s "$domainsfile" ] && set -- "$@" "$domainsfile"
   [ -s "$qfdomfile" ] && set -- "$@" "$qfdomfile"
 
-  awk -F'|' -v pf="$dnspairfile" -v qf="$qfdomfile" '
+  awk -F'|' -v pf="$dnspairfile" -v qf="$qfdomfile" -v excs="$dnsexceptions" '
+    BEGIN { n = split(excs, ea, " "); for (i = 1; i <= n; i++) exc[ea[i]] = 1 }
     function addmatch(d, sn, fn) {
       if (index(","msrc[d]",", ","sn",") == 0) msrc[d] = (msrc[d]=="" ? sn : msrc[d]","sn)
       if (index(","mfam[d]",", ","fn",") == 0) mfam[d] = (mfam[d]=="" ? fn : mfam[d]","fn)
     }
     FILENAME==pf {
       d = $1
-      while (index(d, ".")) { if (index(","srcs[d]",", ","$2",") == 0) srcs[d] = (srcs[d]=="" ? $2 : srcs[d]","$2); d = substr(d, index(d, ".") + 1) }
+      while (index(d, ".")) { if (index(","srcs[d]",", ","$2",") == 0) srcs[d] = (srcs[d]=="" ? $2 : srcs[d]","$2); if (d in exc) break; d = substr(d, index(d, ".") + 1) }
       next
     }
     {
