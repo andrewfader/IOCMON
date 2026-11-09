@@ -901,7 +901,7 @@ updatecheck()
 
     if [ "$track" == "1" ]; then
       UpdateNotify=0
-    elif [ "$DLversion" != "$version" ]; then
+    elif [ "$(vercompare "$DLversion" "$version")" = "gt" ]; then
       DLversionPF=$(printf "%-8s" "$DLversion")
       versionPF=$(printf "%-8s" "$version")
       UpdateNotify="${InvYellow} ${InvDkGray}${CWhite} Stable Track Update available: v$versionPF -> v$DLversionPF                                                                                   ${CClear}"
@@ -3423,6 +3423,7 @@ normalizefeeds()
             else if (typ ~ /_hash$/) { out = hashesout; base = typ }
             else { skip++; next }
             fam = (mal != "" ? mal : base); if (extra != "") fam = fam" ("extra")"; gsub(/\|/, "/", fam)
+            if (out == domainsout) val = tolower(val)
             print val"|threatfox|"fam >> out
           }
           END { print skip+0 }')"
@@ -3444,7 +3445,11 @@ normalizefeeds()
     mv "$tmpdomains" "$feedsroot/domains.txt"
   else
     rm -f "$tmpdomains"
-    : > "$feedsroot/domains.txt"
+    if [ "${enablenetapi:-0}" -eq 1 ] || [ "${enableurlhaus:-0}" -eq 1 ] || [ "${enablethreatfox:-0}" -eq 1 ]; then
+      echo -e "$(date +'%b %d %Y %X') $(_GetLAN_HostName_) IOCMON[$$] - WARNING: Feed normalization produced zero domain indicators; leaving the previous domains.txt in place." >> "$logfile"
+    else
+      : > "$feedsroot/domains.txt"
+    fi
   fi
 
   if [ -s "$tmphashes" ]; then
@@ -4797,7 +4802,7 @@ raisealert()
       return
     fi
 
-    { awk -F'\t' -v k="$key" '$1!=k' "$dbfile"; printf '%s\t%s\n' "$key" "$nowepoch"; } > "${dbfile}.tmp"
+    { awk -F'\t' -v k="$key" -v c="$((nowepoch - cooldownsec))" '$1!=k && $2>=c' "$dbfile"; printf '%s\t%s\n' "$key" "$nowepoch"; } > "${dbfile}.tmp"
     mv "${dbfile}.tmp" "$dbfile"
   fi
 
@@ -5852,7 +5857,16 @@ checkdns()
     lastcount="$(syslogresumepoint "$synclog" "$lastcount" "$anchor" "$linecount")"
     newlines=$((linecount - lastcount))
 
-    anchor="$(tail -n 1 "$synclog")"
+    dnsrangefile="/tmp/iocmon_dns_range.$$"
+    if [ "$newlines" -gt 0 ]; then
+      : > "$dnsrangefile"
+      [ "$lastcount" -eq 0 ] && [ -n "$anchor" ] && [ -f "$synclog-1" ] && ANCHOR="$anchor" awk 'f {print} $0 == ENVIRON["ANCHOR"] {f=1}' "$synclog-1" > "$dnsrangefile"
+      tail -n +"$((lastcount + 1))" "$synclog" | head -n "$newlines" >> "$dnsrangefile"
+      anchor="$(tail -n 1 "$dnsrangefile")"
+    else
+      : > "$dnsrangefile"
+      anchor="$(tail -n 1 "$synclog")"
+    fi
     [ -n "$checkpointfile" ] && echo "$linecount" > "$checkpointfile"
     [ -n "$anchorfile" ] && printf '%s\n' "$anchor" > "$anchorfile"
     dnscheckpointcache="$linecount"
@@ -5864,9 +5878,9 @@ checkdns()
     dnslastcheck=$(date +'%H:%M')
 
     local dnsmasqlines
-    dnsmasqlines="$(tail -n "$newlines" "$synclog" | grep -Fc 'dnsmasq')"
+    dnsmasqlines="$(grep -Fc 'dnsmasq' "$dnsrangefile")"
 
-    querypairs="$(tail -n "$newlines" "$synclog" | grep -F 'dnsmasq' | awk '
+    querypairs="$(grep -F 'dnsmasq' "$dnsrangefile" | awk '
       {
         domain=""; src=""
         for (i=1; i<=NF; i++) {
@@ -5876,8 +5890,10 @@ checkdns()
         if (domain!="" && src!="") print domain"|"src
       }
     ' | sort -u)"
+    rm -f "$dnsrangefile"
 
     if [ -z "$querypairs" ]; then
+      rm -f "$dnsrangefile"
       if [ "$dnsmasqlines" -gt 0 ] && [ "$dnsquerymissingwarned" != "1" ]; then
         echo -e "$(date +'%b %d %Y %X') $(_GetLAN_HostName_) IOCMON[$$] - WARNING: DNS watch sees dnsmasq activity in the log but no query[...] lines. Two known causes: (1) log-queries is configured but dnsmasq hasn't picked it up yet - try 'service restart_dnsmasq'; (2) DHCP hands LAN clients a DNS server that isn't this router's own LAN IP, so queries never pass through this dnsmasq at all - check the DHCP Server DNS setting in the web UI if (1) doesn't help." >> "$logfile"
         dnsquerymissingwarned=1
@@ -5885,7 +5901,8 @@ checkdns()
       return
     fi
     dnsquerymissingwarned=0
-    [ -n "$(selfqfiles)" ] && tail -n "$newlines" "$synclog" | grep -F 'dnsmasq' | dnslogtimes "$(routeraddrs)" > "$dnspairfile.times"
+    [ -n "$(selfqfiles)" ] && grep -F 'dnsmasq' "$dnsrangefile" | dnslogtimes "$(routeraddrs)" > "$dnspairfile.times"
+    rm -f "$dnsrangefile"
   fi
 
   dnsqueriedcount="$(echo "$querypairs" | wc -l | tr -d ' ')"
@@ -5925,7 +5942,11 @@ checkdns()
       if (index(","msrc[d]",", ","sn",") == 0) msrc[d] = (msrc[d]=="" ? sn : msrc[d]","sn)
       if (index(","mfam[d]",", ","fn",") == 0) mfam[d] = (mfam[d]=="" ? fn : mfam[d]","fn)
     }
-    FILENAME==pf { srcs[$1] = (srcs[$1]=="" ? $2 : srcs[$1]","$2); next }
+    FILENAME==pf {
+      d = $1
+      while (index(d, ".")) { if (index(","srcs[d]",", ","$2",") == 0) srcs[d] = (srcs[d]=="" ? $2 : srcs[d]","$2); d = substr(d, index(d, ".") + 1) }
+      next
+    }
     {
       if (FILENAME==qf) { ind=$0; srcname="qfeeds"; famname="osint-domain" } else { ind=$1; srcname=$2; famname=$3 }
       if (ind in srcs) addmatch(ind, srcname, famname)
@@ -5935,7 +5956,7 @@ checkdns()
     }
   ' "$@" | while IFS='|' read -r srcip matcheddomain source family; do
     selftool=""
-    [ -s "$dnspairfile.self" ] && selftool="$(selfqtool "$dnspairfile.self" "$srcip" "$matcheddomain")"
+    [ -s "$dnspairfile.self" ] && selftool="$(selfqtool "$dnspairfile.self" "$srcip" "$matcheddomain" base)"
     if indnsexceptionlist "$matcheddomain"; then
       echo -e "$(date +'%b %d %Y %X') $(_GetLAN_HostName_) IOCMON[$$] - INFO: DNS query for $matcheddomain from $srcip matched the $source IoC feed but is on the DNS exception list - no alert raised." >> "$logfile"
     elif [ -n "$selftool" ]; then
@@ -5958,7 +5979,7 @@ dnstunnelscan()
       n=split(domain, parts, ".")
       if (n>=2) base=parts[n-1]"."parts[n]; else base=domain
       count[src"|"base]++
-      if (length(domain) >= namelen) print "LONG|"src"|"domain"|"base
+      if (length(domain) >= namelen && ++longs[src"|"base] <= 3) print "LONG|"src"|"domain"|"base
     }
     END {
       for (k in count) {
@@ -9181,7 +9202,7 @@ if [ "$1" == "-autoupdate" ]; then
     betacheck
     if [ "$updateiocm" -eq 1 ]; then
       resolveupdatesource
-      if [ -n "$remoteversion" ] && [ "$version" != "$remoteversion" ]; then
+      if [ -n "$remoteversion" ] && [ "$(vercompare "$remoteversion" "$version")" = "gt" ]; then
         echo > "$updatingfile"
         if downloadiocmonupdate "$remoteurl" "$remotelabel"; then
           touch "$restartpendingfile"
