@@ -3932,6 +3932,8 @@ _DownloadCEMLibraryFile_()
 }
 
 # -------------------------------------------------------------------------------------------------------------------------
+emailfallbacksubject="ALERT: IOCMON could not deliver a security alert"
+
 # _SendEMailNotification_ - ARG1 FROM_NAME alias, ARG2 subject, ARG3 body-text file path, ARG4 body title (optional).
 
 _SendEMailNotification_()
@@ -3942,6 +3944,7 @@ _SendEMailNotification_()
        printf "${CRed}\r[ERROR: Email library script ($CUSTOM_EMAIL_LIBFile) *NOT* FOUND.]${CClear}"
        sleep 5
        echo -e "$(date +'%b %d %Y %X') $(_GetLAN_HostName_) IOCMON[$$] - **ERROR**: Email library script [$CUSTOM_EMAIL_LIBFile] *NOT* FOUND." >> "$logfile"
+       emailsendrc=1
        return 1
    fi
 
@@ -3951,6 +3954,7 @@ _SendEMailNotification_()
        printf "${CRed}\r[ERROR: INSUFFICIENT email parameters]${CClear}"
        sleep 5
        echo -e "$(date +'%b %d %Y %X') $(_GetLAN_HostName_) IOCMON[$$] - **ERROR**: INSUFFICIENT email parameters." >> "$logfile"
+       emailsendrc=1
        return 1
    fi
    local retCode  emailBodyTitleStr=""
@@ -3975,8 +3979,20 @@ _SendEMailNotification_()
      printf "${CRed}\r[ERROR: Failure to send email notification (Error Code: $retCode - $statustext).]${CClear}"
      echo -e "$(date +'%b %d %Y %X') $(_GetLAN_HostName_) IOCMON[$$] - **ERROR**: Failure to send email notification [$2]" >> "$logfile"
      sleep 5
+     case "$2" in
+       TEST:*|"$emailfallbacksubject") ;;
+       *)
+         {
+           emailrow "" "IOCMON raised a security alert, but the email with its details could not be delivered. Your mail provider may have rejected it for naming a flagged domain or address."
+           printf "\n"
+           emailrow "" "Please review the 'IOC match' lines in $logfile on the router."
+         } > "$3"
+         _SendEMailNotification_ "$1" "$emailfallbacksubject" "$3" "$emailfallbacksubject"
+         retCode="$?" ;;
+     esac
    fi
 
+   emailsendrc="$retCode"
    return "$retCode"
 }
 
@@ -4022,6 +4038,27 @@ loadcemlibrary()
 }
 
 # -------------------------------------------------------------------------------------------------------------------------
+# emaildefang breaks the last dot of each hostname-like token (evil.com -> evil[.]com) because mail filters vet the hostnames they find
+
+emaildefang()
+{
+  printf '%s' "$1" | sed -E 's/([[:alnum:]-])\.([[:alnum:]-]+)(\.?([^[:alnum:].-]|$))/\1[.]\2\3/g'
+}
+
+# emailshownindicator prints an indicator ($2) for display: for network kinds ($1) the remote side is defanged, the local source is not
+
+emailshownindicator()
+{
+  case "$1" in
+    conntrack|dns|auth|simulated)
+      case "$2" in
+        *"->"*) printf '%s->%s' "${2%%->*}" "$(emaildefang "${2#*->}")" ;;
+        *) emaildefang "$2" ;;
+      esac ;;
+    *) printf '%s' "$2" ;;
+  esac
+}
+
 # emailrow prints "label:" plus $2 HTML-escaped and word-wrapped to $emailwrapwidth (blank label = plain text, $3=b = bold)
 
 emailrow()
@@ -4123,20 +4160,21 @@ emailfamilyrows()
 
 emailalertbody()
 {
-  local kind="$1" indicator="$2" source="$3" detail="$4" feeds plural="" hash fam
+  local kind="$1" indicator="$2" source="$3" detail="$4" feeds plural="" hash fam shown
+  shown="$(emailshownindicator "$kind" "$indicator")"
   feeds="$(emailfeedname "$source")"
   case "$source" in *,*) plural="s" ;; esac
   case "$kind" in
     conntrack)
-      emailrow "" "IOCMON detected an active connection ($indicator, local device -> remote host)"
+      emailrow "" "IOCMON detected an active connection ($shown, local device -> remote host)"
       emailsection "Matches the $feeds IoC feed$plural"
       emailfamilyrows "$detail"
       emailrow "advice" "This address may be a botnet command-and-control server or other malicious host. Please review connected devices and investigate for compromise." ;;
     dns)
-      emailrow "" "IOCMON observed a DNS query ($indicator, local device -> queried domain)"
+      emailrow "" "IOCMON observed a DNS query ($shown, local device -> queried domain)"
       if [ "$source" = "dns-tunnel-heuristic" ]; then
         emailsection "Matches a DNS-tunneling/exfiltration heuristic"
-        emailrow "reason" "$detail"
+        emailrow "reason" "$(emaildefang "$detail")"
         emailrow "note" "A pattern-based suspicion, not a confirmed threat-intelligence match: this domain is not in any known-malicious feed. A legitimate service with an unusually long or fast-changing hostname can trigger this."
         emailrow "advice" "Please verify manually before treating this as a confirmed compromise. If it is expected, add the domain to the DNS exceptions list (Advanced Settings - DNS Watch & Tunneling Detection) to stop it recurring."
       else
@@ -4148,7 +4186,7 @@ emailalertbody()
       emailrow "" "IOCMON detected repeated failed login attempts"
       emailsection "Possible brute-force login attempts"
       emailrow "service" "$source"
-      emailrow "from" "$indicator"
+      emailrow "from" "$shown"
       emailrow "attempts" "$detail"
       emailrow "advice" "Please verify this is not an authorized user and consider blocking this address." ;;
     fsintegrity)
@@ -4176,7 +4214,7 @@ emailalertbody()
     simulated)
       emailrow "" "This is a SIMULATED detection triggered via the (T)est hotkey to confirm IOCMON's full detection-to-alert pipeline is working."
       emailsection "SIMULATED TEST - no real compromise has been detected"
-      emailrow "indicator" "$indicator"
+      emailrow "indicator" "$shown"
       emailrow "feed" "$feeds"
       emailfamilyrows "${detail% - SIMULATED TEST*}" ;;
     *)
@@ -4209,16 +4247,17 @@ sendmessage()
   if [ "$emaillimit" -eq 0 ]
     then
 
-    local emailSubject="" emailBodyTitle=""
+    local emailSubject="" emailBodyTitle="" shown
+    shown="$(emailshownindicator "$kind" "$indicator")"
 
     case "$kind" in
       test) emailSubject="TEST: IOCMON email notification test" ;;
-      simulated) emailSubject="TEST: Simulated IOC detection ($indicator)" ;;
-      conntrack) emailSubject="ALERT: Connection to known-malicious IP ($indicator)" ;;
+      simulated) emailSubject="TEST: Simulated IOC detection ($shown)" ;;
+      conntrack) emailSubject="ALERT: Connection to known-malicious IP ($shown)" ;;
       dns)
-        if [ "$source" = "dns-tunnel-heuristic" ]; then emailSubject="ALERT: Suspicious DNS query pattern detected ($indicator)"
-        else emailSubject="ALERT: DNS query for known-malicious domain ($indicator)"; fi ;;
-      auth) emailSubject="WARNING: Possible brute-force login attempts from $indicator" ;;
+        if [ "$source" = "dns-tunnel-heuristic" ]; then emailSubject="ALERT: Suspicious DNS query pattern detected ($shown)"
+        else emailSubject="ALERT: DNS query for known-malicious domain ($shown)"; fi ;;
+      auth) emailSubject="WARNING: Possible brute-force login attempts from $shown" ;;
       fsintegrity) emailSubject="ALERT: Filesystem-integrity event - $indicator" ;;
       cron) emailSubject="ALERT: Unexpected new cron entry detected" ;;
       *) emailSubject="ALERT: IOCMON detected a security event ($kind)" ;;
@@ -4310,8 +4349,14 @@ flushemailbatch()
   [ -n "$stateroot" ] || return
 
   local batchfile="$stateroot/email_batch.pending" sendfile="$stateroot/email_batch.sending" count tab
+  local retryfile="$stateroot/email_batch.retry" tries=0 nextretry=0
 
   [ -s "$batchfile" ] || return
+  [ -f "$retryfile" ] && read -r tries nextretry < "$retryfile"
+  case "$tries" in ""|*[!0-9]*) tries=0 ;; esac
+  case "$nextretry" in ""|*[!0-9]*) nextretry=0 ;; esac
+  [ "$(date +%s)" -lt "$nextretry" ] && return
+  emailsendrc=0
   mv "$batchfile" "$sendfile"
 
   count="$(wc -l < "$sendfile" | tr -d ' ')"
@@ -4327,7 +4372,16 @@ flushemailbatch()
     sendbatchmessage "$sendfile" "$count"
   fi
 
-  rm -f "$sendfile"
+  if [ "$emailsendrc" -eq 0 ]; then
+    rm -f "$sendfile" "$retryfile"
+  elif [ "$((tries + 1))" -ge 6 ]; then
+    echo -e "$(date +'%b %d %Y %X') $(_GetLAN_HostName_) IOCMON[$$] - **ERROR**: Gave up emailing $count alert(s) after $((tries + 1)) attempts; see the IOC match lines in this log." >> "$logfile"
+    rm -f "$sendfile" "$retryfile"
+  else
+    echo "$((tries + 1)) $(($(date +%s) + 600))" > "$retryfile"
+    { cat "$sendfile"; cat "$batchfile" 2>/dev/null; } | tail -n 100 > "$batchfile.tmp" && mv -f "$batchfile.tmp" "$batchfile"
+    rm -f "$sendfile"
+  fi
 }
 
 # -------------------------------------------------------------------------------------------------------------------------
@@ -4629,7 +4683,7 @@ reputationemailblock()
 $rec
 EOF
   printf "\n"
-  emailsection "AbuseIPDB reputation for $ip"
+  emailsection "AbuseIPDB reputation for $(emaildefang "$ip")"
   emailrow "note" "$note"
   emailrow "score" "${score}% abuse confidence"
   emailrow "reports" "$total from $users distinct user(s) in the last $abuseipdbmaxage days"
@@ -4638,8 +4692,8 @@ EOF
   emailrow "country" "${cname:-${cc:-unknown}}${cname:+ (${cc})}"
   emailrow "usage type" "${usage:-n/a}"
   emailrow "ISP" "${isp:-n/a}"
-  emailrow "domain" "${domain:-n/a}"
-  emailrow "hostnames" "${hostnames:-none}"
+  emailrow "domain" "$(emaildefang "${domain:-n/a}")"
+  emailrow "hostnames" "$(emaildefang "${hostnames:-none}")"
   emailrow "Tor exit" "${tor:-n/a}"
   emailrow "whitelisted" "${wl:-n/a}"
   emaillinkrow "details" "https://www.abuseipdb.com/check/$ip"
@@ -4697,10 +4751,10 @@ astraeaemailblock()
   [ -n "$rec" ] || return 0
   v="$(echo "$rec" | cut -f2)"; reason="$(echo "$rec" | cut -f3)"
   printf "\n"
-  emailsection "Astraea certificate intel for $1"
+  emailsection "Astraea certificate intel for $(emaildefang "$1")"
   emailrow "note" "information only - Astraea's view of this site's certificates; it does not change this alert"
   emailrow "verdict" "$v"
-  emailrow "reason" "${reason:-no detail}"
+  emailrow "reason" "$(emaildefang "${reason:-no detail}")"
   emaildivider
 }
 
