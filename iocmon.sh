@@ -1029,8 +1029,7 @@ saveconfig()
     echo 'track='$track
     echo 'otxreportsort="'"$otxreportsort"'"'
     echo 'enablewebui='$enablewebui
-  } > "$config"
-  chmod 600 "$config"
+  } > "$config.new" && chmod 600 "$config.new" && mv -f "$config.new" "$config" || rm -f "$config.new"
 
   echo -e "$(date +'%b %d %Y %X') $(_GetLAN_HostName_) IOCMON[$$] - INFO: IOCMON config has been updated." >> "$logfile"
 
@@ -3530,29 +3529,32 @@ buildskynetimportfile()
   skynetprogress 4 6 "Filtering IP/CIDR exceptions"
   awk -v exc="$ipexceptions" '
     function toint(ip,  a) { split(ip, a, "."); return (a[1]*16777216)+(a[2]*65536)+(a[3]*256)+a[4] }
-    function excepted(entry,    k, ip, pp, d) {
-      if (entry in plainexc) return 1
-      if (index(entry, "/") > 0) return 0
-      ip = entry
-      for (k = 1; k <= excn; k++) {
-        if (!iscidr[k]) continue
-        d = 2 ^ (32 - cidrmask[k])
-        if (int(toint(ip) / d) == int(cidrnet[k] / d)) return 1
+    function fromint(n) { return int(n / 16777216) "." (int(n / 65536) % 256) "." (int(n / 256) % 256) "." (n % 256) }
+    function keep(net, m, k,    d) {
+      for (; k <= excn; k++) {
+        if (!(k in excnet)) continue
+        d = 2 ^ (32 - (excmask[k] < m ? excmask[k] : m))
+        if (int(net / d) != int(excnet[k] / d)) continue
+        if (excmask[k] <= m) return
+        d = 2 ^ (31 - m)
+        net = int(net / (2 * d)) * (2 * d)
+        keep(net, m + 1, k + 0)
+        keep(net + d, m + 1, k + 0)
+        return
       }
-      return 0
+      print (m == 32 ? fromint(net) : fromint(net) "/" m)
     }
     BEGIN {
       excn = split(exc, ea, " ")
       for (k = 1; k <= excn; k++) {
         if (ea[k] == "") continue
-        if (index(ea[k], "/") > 0) {
-          split(ea[k], pp, "/")
-          if ((pp[2] + 0) < 0 || (pp[2] + 0) > 32) continue
-          cidrnet[k] = toint(pp[1]); cidrmask[k] = pp[2] + 0; iscidr[k] = 1
-        } else { plainexc[ea[k]] = 1 }
+        split(ea[k], pp, "/")
+        mask = (pp[2] == "" ? 32 : pp[2] + 0)
+        if (mask < 0 || mask > 32) continue
+        excnet[k] = toint(pp[1]); excmask[k] = mask
       }
     }
-    { if (!excepted($0)) print }
+    { split($0, pp, "/"); keep(toint(pp[1]), (pp[2] == "" ? 32 : pp[2] + 0), 1) }
   ' "$out" > "${out}.tmp"
   mv "${out}.tmp" "$out"
 }
@@ -5218,7 +5220,7 @@ aghquerypairs()
         rm -rf "$tmp"; return 1
       fi
     fi
-    sed 1d "$tmp/page" >> "$tmp/all"
+    sed 1d "$tmp/page" | grep -E '^(Q\|[a-z0-9_.-]+\|[0-9A-Fa-f.:]+\|[0-9]+\|[01]|R\|[a-z0-9_.-]+\|[0-9A-Fa-f.:]+)$' >> "$tmp/all"
     pages=$((pages + 1))
     [ -z "$cur" ] && { done=1; break; }
     [ "${n:-0}" -lt "$aghpagesize" ] && { done=1; break; }
@@ -6136,13 +6138,15 @@ checknvram()
   [ -z "$stateroot" ] && return
   mkdir -m 755 -p "$stateroot"
 
-  local baseline="$stateroot/nvram_baseline.db" newbaseline="$stateroot/nvram_baseline.db.new"
+  local baseline="$stateroot/nvram_baseline.db" newbaseline="/tmp/iocmon_nvram_baseline.$$"
   local firstrun=0 var newval oldval recorded change
   nvramlastcheck=$(date +'%H:%M')
   [ -s "$baseline" ] || firstrun=1
   recorded="$(awk -F'=' '$1=="__recorded"{sub(/^[^=]*=/,""); print; exit}' "$baseline" 2>/dev/null)"
 
-  echo "__recorded=$(date +'%b %d %Y %X')" > "$newbaseline"
+  recorded="${nvramrecorded:-$recorded}"
+  nvramrecorded="$(date +'%b %d %Y %X')"
+  echo "__recorded=$nvramrecorded" > "$newbaseline"
   for var in $nvramwatchvars; do
     if ! nvramget "$var"; then
       grep "^${var}=" "$baseline" >> "$newbaseline" 2>/dev/null
@@ -6162,7 +6166,11 @@ checknvram()
     fi
   done
 
-  mv "$newbaseline" "$baseline"
+  if [ -f "$baseline" ] && [ "$(sed 1d "$newbaseline")" = "$(sed 1d "$baseline")" ]; then
+    rm -f "$newbaseline"
+  else
+    mv -f "$newbaseline" "$baseline"
+  fi
 }
 
 # -------------------------------------------------------------------------------------------------------------------------
