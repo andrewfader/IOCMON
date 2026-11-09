@@ -5957,6 +5957,7 @@ dnstunnelscan()
       domain=$1; src=$2
       n=split(domain, parts, ".")
       if (n>=2) base=parts[n-1]"."parts[n]; else base=domain
+      if (base ~ /\.arpa$/) next
       count[src"|"base]++
       if (length(domain) >= namelen) print "LONG|"src"|"domain"|"base
     }
@@ -6064,8 +6065,8 @@ checkauth()
   [ -f "$dropbearseenfile" ] || dbfirst=1
   [ -f "$httpdseenfile" ] || hdfirst=1
 
-  dropbearlines="$(grep -F 'dropbear' "$synclog" | grep -F 'Bad password attempt' | authnewlines "$dropbearseenfile")"
-  httpdlines="$(grep -iF 'httpd' "$synclog" | grep -iE 'login.?fail|invalid.?password|authentication.?fail' | authnewlines "$httpdseenfile")"
+  dropbearlines="$(grep -F 'dropbear' "$synclog" | grep -E 'Bad password attempt|Login attempt for nonexistent user' | authnewlines "$dropbearseenfile")"
+  httpdlines="$(grep -E ' HTTPD(\[[0-9]+\])?: \[LOGIN\]\[[a-z]+\]\[[A-Za-z]+\] failed \(' "$synclog" | authnewlines "$httpdseenfile")"
 
   if [ "$dbfirst" -eq 1 ]; then
     dropbearlines=""
@@ -6206,7 +6207,7 @@ fscontenthashchanged()
   awk -F'\t' -v p="$path" '$1!=p' "$hashdb" 2>/dev/null > "$tmpfile"
   printf '%s\t%s\n' "$path" "$newhash" >> "$tmpfile"
   mv "$tmpfile" "$hashdb"
-  [ -z "$oldhash" ] && return 1
+  [ -z "$oldhash" ] && return 0
   [ "$oldhash" != "$newhash" ]
 }
 
@@ -6347,7 +6348,7 @@ fspathexcluded()
   local path="$1" ex extpattern
 
   case "$path" in
-    "$iocmonroot"|"$iocmonroot"/*) return 0 ;;
+    "${iocmonroot:-/nonexistent}"|"${iocmonroot:-/nonexistent}"/*) return 0 ;;
     "$addonsdir"|"$addonsdir"/*) return 0 ;;
     "$CUSTOM_EMAIL_LIBDir"|"$CUSTOM_EMAIL_LIBDir"/*) return 0 ;;
     *.iocmon-quarantine) return 0 ;;
@@ -6786,7 +6787,7 @@ checkentwarecron()
 
   cat $srcfiles 2>/dev/null | grep -v '^[[:space:]]*#' | grep -v '^[[:space:]]*$' | sort > "$newtab"
 
-  if [ ! -s "$oldtab" ]; then
+  if [ ! -f "$oldtab" ]; then
     mv "$newtab" "$oldtab"
     return
   fi
@@ -6818,7 +6819,7 @@ checkfirewallrules()
 
   iptables-save -t nat 2>/dev/null | grep -E '^-A (VSERVER|GAME_VSERVER|VUPNP) ' | sort > "$newtab"
 
-  if [ ! -s "$oldtab" ]; then
+  if [ ! -f "$oldtab" ]; then
     mv "$newtab" "$oldtab"
     return
   fi
